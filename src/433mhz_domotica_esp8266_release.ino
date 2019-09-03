@@ -11,17 +11,34 @@
  *    
  * Libraries used:
  * ESP8266WiFi (https://github.com/esp8266/Arduino/releases)
+ * ESP8266mDNS (https://github.com/esp8266/Arduino/releases)
+ * WiFiUdp (https://github.com/esp8266/Arduino/releases)
+ * ArduinoOTA (https://github.com/esp8266/Arduino/releases)
  * RCSwitch (https://github.com/sui77/rc-switch)
  * NewRemoteSwitch (https://bitbucket.org/fuzzillogic/433mhzforarduino)
  * 
  * Based on code from: 
+ * - ESP8266 library examples
  * - the RCSwitch and NewRemoteTransmitter library examples
  * - https://randomnerdtutorials.com/esp8266-web-server-with-arduino-ide/
  * - https://www.instructables.com/id/Programming-a-HTTP-Server-on-ESP-8266-12E/
+ * 
+ * Used ports:
+ * D1: Receiver
+ * D2: Transmitter
+ * D3: Button 1
+ * D4: Builtin led
+ * D5: Button 2
+ * D6: Button 3
+ * D7: Button 4
+ * 
 */
 
 // #### INCLUDES ####
 #include <ESP8266WiFi.h>
+#include <ESP8266mDNS.h>
+#include <WiFiUdp.h>
+#include <ArduinoOTA.h>
 #include <RCSwitch.h>
 #include <NewRemoteTransmitter.h>
 
@@ -33,9 +50,17 @@
   #define DEBUG_MSG(...)
 #endif
 
+
 // #### SETUP WIFI####
-const char *ssid = "YOURSSID";
-const char *password = "YOURPASSWORD";
+#ifndef STASSID
+  #define STASSID "YOUR SSID"
+  #define STAPSK  "YOUR WIFI PASSWORD"
+#endif
+
+const char *ssid = STASSID;
+const char *password = STAPSK;
+
+// #### SETUP NETWORK ####
 IPAddress staticIP(192,168,0,45);
 IPAddress gateway(192,168,0,1);
 IPAddress subnet(255,255,255,0);
@@ -43,20 +68,20 @@ IPAddress subnet(255,255,255,0);
 // #### SETUP WEBSERVER ON PORT 80 ####
 WiFiServer server(80);
 
-// #### SETUP TRANSMITTERS ####
-// klikaanklikuit / clickonclickoff
+// #### SETUP TRANSMITTERS / TRANSMITTER PINS ####
+// ## klikaanklikuit / clickonclickoff ##
 NewRemoteTransmitter transmitter(123, D2, 260, 3); // dimmer group on address 123, pin D2, period duration 260ms, repeat on 2^3=8 times
-//NewRemoteTransmitter transmitter2(125, D2, 260, 3); // transmitter group, same as above but on address 125 <- not in use for now
-// any other 433mhz receiver/transmitter
+//NewRemoteTransmitter transmitter2(125, D2, 260, 3); // outlet receiver group, same as above but on address 125 <- not in use for now
+// ## any other 433mhz receiver/transmitter ##
 RCSwitch mySwitch = RCSwitch(); // activate RCSwitch library
 
 // #### SETUP PINS ####
 const int ledPin = D4; // builtin led
 // setup button pins
-const byte interruptPin1 = D7;
-const byte interruptPin2 = D5;
-const byte interruptPin3 = D6;
-const byte interruptPin4 = D3;
+const byte interruptPin1 = D3; // all lights
+const byte interruptPin2 = D5; // living room
+const byte interruptPin3 = D6; // dining table
+const byte interruptPin4 = D7; // desk
 
 // #### SETUP TIMER VARIABLES ####
 unsigned long currentTime = millis(); // Set current time variable once at restart
@@ -68,6 +93,7 @@ long interval = 5; // startup timer interval in ms
 // #### SETUP VARIABLES ####
 // RCSwitch group and device variables
 const char* group1 = "10000";
+const char* group2 = "01000";
 const char* device1 = "10000";
 const char* device2 = "01000";
 const char* device3 = "00100";
@@ -86,11 +112,11 @@ String output4State = "off"; // desk light variable
 // startup variable
 bool startup = false; // run once variable
 
-// Decode HTTP GET value
-String valueString1 = String(5); // dimmer variable
+// Decode dimmer HTTP GET value
+String valueString1 = String(15); // dimmer variable
 int dim1pos1 = 0; // dimmer address position1
 int dim1pos2 = 0; // dimmer address position2
-String valueString2 = String(5); // dimmer variable
+String valueString2 = String(15); // dimmer variable
 int dim2pos1 = 0; // dimmer address position1
 int dim2pos2 = 0; // dimmer address position2
 
@@ -126,26 +152,93 @@ void setup(void) {
   WiFi.config(staticIP, gateway, subnet);
   WiFi.forceSleepWake();
   WiFi.persistent(false);
+  WiFi.hostname("licht");
   WiFi.mode(WIFI_OFF);
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
   
   // Wait for wifi connection
-  while (WiFi.status() != WL_CONNECTED) {
+  /*
+    while (WiFi.status() != WL_CONNECTED) { // just wifi
     delay(500);
     Serial.print(".");
     }
+  */
+  while (WiFi.waitForConnectResult() != WL_CONNECTED) { // wifi and OTA
+    Serial.println("Connection Failed! Rebooting...");
+    delay(5000);
+    ESP.restart();
+  }
 
   // print wifi connected info
   Serial.println("");
   Serial.println("## WiFi connected ##");
-  Serial.print("## IP address: ");
+  Serial.print("## OTA hostname: ");
+  Serial.print(WiFi.hostname());
+  Serial.println(" ##");
+  Serial.print("## OTA IP address: ");
   Serial.print(WiFi.localIP());
   Serial.println(" ##");
+
+  // Port defaults to 8266
+  // ArduinoOTA.setPort(8266); // default
+
+  // Hostname defaults to esp8266-[ChipID]
+  ArduinoOTA.setHostname("licht");
+
+  // No authentication by default
+  ArduinoOTA.setPassword("update");
+
+  // Password can be set with it's md5 value as well
+  // MD5(admin) = 21232f297a57a5a743894a0e4a801fc3
+  // ArduinoOTA.setPasswordHash("21232f297a57a5a743894a0e4a801fc3");
+
+  // Start mDNS
+  if (!MDNS.begin("licht"))     { Serial.println("Error setting up MDNS responder!"); }
+  else                          { Serial.println("## mDNS responder started ##"); }
 
   // start webserver
   server.begin();
   Serial.println("## HTTP server started ##");
+
+  // start OTA
+  ArduinoOTA.onStart([]() {
+    String type;
+    Serial.println("## START OTA ##");
+    if (ArduinoOTA.getCommand() == U_FLASH) {
+      type = "sketch";
+    } else { // U_FS
+      type = "filesystem";
+    }
+
+    // NOTE: if updating FS this would be the place to unmount FS using FS.end()
+    Serial.println("Start updating " + type);
+  });
+  ArduinoOTA.onEnd([]() {
+    Serial.println("\nEnd");
+  });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) {
+      Serial.println("Auth Failed");
+    } else if (error == OTA_BEGIN_ERROR) {
+      Serial.println("Begin Failed");
+    } else if (error == OTA_CONNECT_ERROR) {
+      Serial.println("Connect Failed");
+    } else if (error == OTA_RECEIVE_ERROR) {
+      Serial.println("Receive Failed");
+    } else if (error == OTA_END_ERROR) {
+      Serial.println("End Failed");
+    }
+  });
+  ArduinoOTA.begin();
+  Serial.println("## OTA READY ##");
+  Serial.print("## IP address: ");
+  Serial.print(WiFi.localIP());
+  Serial.println(" ##");
 
   // set up buttons
   pinMode(interruptPin1, INPUT_PULLUP);
@@ -157,13 +250,13 @@ void setup(void) {
   pinMode(interruptPin4, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(interruptPin4), button4, FALLING);
 
-  // enable RCSwitch
+  // enable RCSwitch library
   mySwitch.enableReceive(D1);  // receiver on interrupt pin D1
   mySwitch.enableTransmit(D2); // transmitter on pin D2
   mySwitch.setPulseLength(320); // set the pulselength in ms
   mySwitch.setRepeatTransmit(15); // repeat the tranmission 15 times
 
-  // set led pin to output and turn it off
+  // set ledPin to output (HIGH is off / LOW is on)
   pinMode(ledPin, OUTPUT);
   digitalWrite(ledPin, HIGH);
 
@@ -182,6 +275,9 @@ void loop() {
   
   // listen for incoming web clients
   runwebsite();
+
+  // handle OTA update requests
+  ArduinoOTA.handle();
 }
 
 void bootup () {
@@ -197,139 +293,169 @@ void bootup () {
   }
 }
 
-void g1d1on () {
+void outlet1on () {
+  Serial.println("group1, device1 on");
   mySwitch.switchOn(group1, device1);
+  output2State = "on"; // livingroom lights variable
 }
 
-void g1d1off () {
+void outlet1off () {
+  Serial.println("group1, device1 off");
   mySwitch.switchOff(group1, device1);
+  output2State = "off"; // livingroom lights variable
 }
 
-void g1d2on () {
+void outlet2on () {
+  Serial.println("group1, device2 on");
   mySwitch.switchOn(group1, device2);
+  output2State = "on"; // livingroom lights variable
 }
 
-void g1d2off () {
+void outlet2off () {
+  Serial.println("group1, device2 off");
   mySwitch.switchOff(group1, device2);
+  output2State = "off"; // livingroom lights variable
 }
 
-void kaku1on () {
-  transmitter.sendUnit(1, true);
+void dimmer1on () {
+  delay(3);// needed between these type of receivers if the next command in loop is for the same receiver or esp crashes
+  Serial.println("KAKU dimmer 1 on");
+  //transmitter.sendUnit(1, true);
+  transmitter.sendDim(1, 15);
+  output3State = "on"; // diningtable light variable
+  Serial.print("Set dimmer1 value to: ");
+  Serial.println(valueString1);
 }
 
-void kaku1off () {
+void dimmer1off () {
+  delay(3);// needed between these type of receivers if the next command in loop is for the same receiver or esp crashes
+  Serial.println("KAKU dimmer 1 off");
   transmitter.sendUnit(1, false);
+  output3State = "off"; // diningtable light variable
 }
 
-void kaku2on () {
-  transmitter.sendUnit(2, true);
+void dimmer2on () {
+  delay(3);// needed between these type of receivers if the next command in loop is for the same receiver or esp crashes
+  Serial.println("KAKU dimmer 2 on");
+  //transmitter.sendUnit(2, true);
+  transmitter.sendDim(2, 15);
+  output4State = "on"; // desk light variable
+  Serial.print("Set dimmer2 value to: ");
+  Serial.println(valueString2);
 }
 
-void kaku2off () {
+void dimmer2off () {
+  delay(3);// needed between these type of receivers if the next command in loop is for the same receiver or esp crashes
+  Serial.println("KAKU dimmer 2 off");
   transmitter.sendUnit(2, false);
+  output4State = "off"; // desk light variable
 }
 
 void allon () {
-  digitalWrite(ledPin, LOW); // start all on
+											
   Serial.println("start all on");
+  outlet1on();
+  outlet2on();
+  dimmer1on();
+  dimmer2on();
   output1State = "on"; // all lights variable
   
-  Serial.println("group1, device1 on");
-  g1d1on();
-  Serial.println("group1, device2 on");
-  g1d2on();
-  output2State = "on"; // livingroom lights variable
+									   
+		   
+									   
+		   
+													
 
-  Serial.println("KAKU dimmer 1 on");
-  kaku1on();
-  output3State = "on"; // diningtable light variable
-  delay(2);// needed between these type of receivers if the next command in loop is for the same receiver or esp crashes
+									 
+			
+													
+																														
   
-  Serial.println("KAKU dimmer 2 on");
-  kaku2on();
-  output4State = "on"; // desk light variable
-  delay(2);// needed between these type of receivers if the next command in loop is for the same receiver or esp crashes
+									 
+			
+											 
+																														
 
   Serial.println("end all on");
-  digitalWrite(ledPin, HIGH); // end all on
+										   
 }
 
 void alloff () {
-  digitalWrite(ledPin, LOW); // start all off
+											 
   Serial.println("start all off");
-  output1State = "off"; // all lights variable
-  
-  Serial.println("group1, device1 off");
-  g1d1off();
-  Serial.println("group1, device2 off");
-  g1d2off();
-  output2State = "off"; // livingroom lights variable
+  outlet1off();
+  outlet2off();
+  dimmer1off();
+  dimmer2off();
+  output1State = "off"; // all lights variable  
+			
+													 
 
-  Serial.println("KAKU dimmer 1 off");
-  kaku1off();
-  output3State = "off"; // diningtable light variable
-  delay(2);// needed between these type of receivers if the next command in loop is for the same receiver or esp crashes
+									  
+			 
+													 
+																														
   
-  Serial.println("KAKU dimmer 2 off");
-  kaku2off();
-  output4State = "off"; // desk light variable
-  delay(21);// needed between these type of receivers if the next command in loop is for the same receiver or esp crashes
+									  
+			 
+											  
+																														 
   
   Serial.println("end all off");
-  digitalWrite(ledPin, HIGH); // end all off
+											
 }
 
 void button1 () {
   if (output1State == "off") {
     Serial.println("button 1: switch all lights on");
     allon();
-    output1State = "on"; // all lights variable
+											   
   }
   else if (output1State == "on") {
     Serial.println("button 1: switch all lights off");
     alloff();
-    output1State = "off"; // all lights variable
+												
   }
 }
 
 void button2 () {
   if (output2State == "off") {
     Serial.println("button 2: livingroom lights on");
-    g1d1on();
-    g1d2on();
-    output2State = "on"; // livingroom lights variable
+    outlet1on();
+    outlet2on();
+													  
   }
   else if (output2State == "on") {
     Serial.println("button 2: livingroom lights off");
-    g1d1off();
-    g1d2off();
-    output2State = "off"; // livingroom lights variable
+    outlet1off();
+    outlet2off();
+													   
   }
 }
 
 void button3 () {
   if (output3State == "off") {
     Serial.println("button 3: diningtable light on");
-    kaku1on();
-    output3State = "on"; // diningtable light variable
+    dimmer1on();
+													  
   }
   else if (output3State == "on") {
     Serial.println("button 3: diningtable light off");
-    kaku1off();
-    output3State == "off"; // diningtable light variable
+    dimmer1off();
+														
   }
 }
 
 void button4 () {
   if (output4State == "off") {
     Serial.println("button 4: desk light on");
-    kaku2on();
-    output4State = "on"; // desk light variable
+    dimmer2on();
+											   
   }
   else if (output4State == "on") {
     Serial.println("button 4: desk light on");
-    kaku2off();
-    output4State = "off"; // desk light variable
+    dimmer2off();
+												
   }
 }
 
@@ -348,7 +474,7 @@ void remote () {
         Serial.print( mySwitch.getReceivedValue() );
         Serial.println(" Remote button A ON received");
         allon();
-        output1State = "on"; // all lights variable
+												   
       }
       break;
 
@@ -357,7 +483,7 @@ void remote () {
         Serial.print( mySwitch.getReceivedValue() );
         Serial.println(" Remote button A OFF received");
         alloff();
-        output1State = "off"; // all lights variable
+													
       }
       break;
       
@@ -365,9 +491,9 @@ void remote () {
       if (output2State == "off") {
         Serial.print( mySwitch.getReceivedValue() );
         Serial.println(" Remote button B ON received");
-        g1d1on();
-        g1d2on();
-        output2State = "on"; // livingroom lights variable
+        outlet1on();
+        outlet2on();
+														  
       }
       break;
       
@@ -375,9 +501,9 @@ void remote () {
       if (output2State == "on") {
         Serial.print( mySwitch.getReceivedValue() );
         Serial.println(" Remote button B OFF received");
-        g1d1off();
-        g1d2off();
-        output2State = "off"; // livingroom lights variable
+        outlet1off();
+        outlet2off();
+														   
       }
       break;
       
@@ -385,8 +511,8 @@ void remote () {
       if (output3State == "off") {
         Serial.print( mySwitch.getReceivedValue() );
         Serial.println(" Remote button C ON received");
-        kaku1on();
-        output3State = "on"; // diningtable light variable
+        dimmer1on();
+														  
       }
       break;
       
@@ -394,8 +520,8 @@ void remote () {
       if (output3State == "on") {
         Serial.print( mySwitch.getReceivedValue() );
         Serial.println(" Remote button C OFF received");
-        kaku1off();
-        output3State = "off"; // diningtable light variable
+        dimmer1off();
+														   
       }
       break;
       
@@ -403,8 +529,8 @@ void remote () {
       if (output4State == "off") {
         Serial.print( mySwitch.getReceivedValue() );
         Serial.println(" Remote button D ON received");
-        kaku2on();
-        output4State = "on"; // desk light variable
+        dimmer2on();
+												   
       }
       break;
       
@@ -412,8 +538,8 @@ void remote () {
       if (output4State == "on") {
         Serial.print( mySwitch.getReceivedValue() );
         Serial.println(" Remote button D OFF received");
-        kaku2off();
-        output4State = "off"; // desk light variable
+        dimmer2off();
+													
       }
       break;
       
@@ -443,37 +569,37 @@ void runwebsite () {
   if (request.indexOf("GET /1/off") != -1) {
     Serial.println("button 1: switch all lights off");
     alloff();
-    output1State = "off";
+						 
   } else if (request.indexOf("GET /1/on") != -1) {
     Serial.println("button 1: switch all lights on");
     allon();
-    output1State = "on";
+						
   } else if (request.indexOf("GET /2/off") != -1) {
     Serial.println("button 2: livingroom lights off");
-    g1d1off();
-    g1d2off();
-    output2State = "off";
+    outlet1off();
+    outlet2off();
+						 
   } else if (request.indexOf("GET /2/on") != -1) {
     Serial.println("button 2: livingroom lights on");
-    g1d1on();
-    g1d2on();
-    output2State = "on";
+    outlet1on();
+    outlet2on();
+						
   } else if (request.indexOf("GET /3/off") != -1) {
     Serial.println("button 3: diningtable light off");
-    kaku1off();
-    output3State = "off";
+    dimmer1off();
+						 
   } else if (request.indexOf("GET /3/on") != -1) {
     Serial.println("button 3: diningtable light on");
-    kaku1on();
-    output3State = "on";
+    dimmer1on();
+						
   } else if (request.indexOf("GET /4/off") != -1) {
     Serial.println("button 4: desk light off");
-    kaku2off();
-    output4State = "off";
+    dimmer2off();
+						 
   } else if (request.indexOf("GET /4/on") != -1) {
     Serial.println("button 4: desk light on");
-    kaku2on();
-    output4State = "on";
+    dimmer2on();
+						
   } else if (request.indexOf("GET /?value1=") != -1) {
     dim1pos1 = request.indexOf('=');
     dim1pos2 = request.indexOf('&');
